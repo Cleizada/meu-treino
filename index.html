@@ -435,6 +435,7 @@ function renderHome(){
         <div class="muted">Treino em andamento</div>
         <div class="big" style="margin:4px 0 12px">${w ? w.icon+' ' : ''}${esc(session.workoutName)}</div>
         <button class="btn" data-act="go" data-v="workout">▶️ Continuar treino</button>
+        <div class="muted" style="margin-top:10px;font-size:.82rem">Quer fazer outro treino? Escolha na lista abaixo — vou perguntar antes de descartar este.</div>
       </div>`;
   } else if(today){
     todayCard = `
@@ -483,7 +484,7 @@ function renderHome(){
     </div>
     <div class="card">
       <h2>🗓️ Todos os treinos</h2>
-      <div class="muted" style="margin-bottom:10px">Toque para iniciar qualquer treino.</div>
+      <div class="muted" style="margin-bottom:10px">Toque para iniciar qualquer treino, em qualquer dia — perfeito para repor um treino perdido.</div>
       ${list}
     </div>`;
 }
@@ -505,11 +506,11 @@ function lastRecord(exName){
   return null;
 }
 
-function startWorkout(id){
+async function startWorkout(id){
   const w = workouts.find(x=>x.id===id);
   if(!w) return;
   if(session && session.workoutId !== id){
-    if(!confirm('Já existe um treino em andamento. Descartar e começar este?')) return;
+    if(!(await askConfirm('Já existe um treino em andamento ('+session.workoutName+'). Descartar e começar este?', 'Trocar treino'))) return;
     session = null;
   }
   if(!session || session.workoutId !== id){
@@ -604,14 +605,14 @@ function toggleBody(ei){ const b = $('exbody-'+ei); if(b) b.style.display = b.st
 function addSet(ei){ session.exercises[ei].sets.push({reps:'',weight:''}); LS.set('session',session); render(); }
 function removeSet(ei,si){ session.exercises[ei].sets.splice(si,1); LS.set('session',session); render(); }
 
-function cancelWorkout(){
-  if(!confirm('Descartar este treino sem salvar?')) return;
+async function cancelWorkout(){
+  if(!(await askConfirm('Descartar este treino sem salvar?', 'Descartar'))) return;
   session = null; LS.set('session',null); restStop(); go('home');
 }
 
-function finishWorkout(){
+async function finishWorkout(){
   const filled = session.exercises.filter(e => e.done || e.sets.some(s=>s.reps||s.weight));
-  if(filled.length===0 && !confirm('Nenhum exercício preenchido. Finalizar mesmo assim?')) return;
+  if(filled.length===0 && !(await askConfirm('Nenhum exercício preenchido. Finalizar mesmo assim?', 'Finalizar'))) return;
 
   const w = workouts.find(x=>x.id===session.workoutId);
   history.push({
@@ -801,8 +802,8 @@ function renderHistory(){
     </div>`;
 }
 
-function deleteHistory(id){
-  if(!confirm('Excluir este registro do histórico?')) return;
+async function deleteHistory(id){
+  if(!(await askConfirm('Excluir este registro do histórico?', 'Excluir'))) return;
   history = history.filter(h=>h.id!==id);
   saveAll(); render(); toast('Registro excluído');
 }
@@ -907,28 +908,51 @@ function renderManage(){
     </div>`;
 }
 
-function resetDefaults(){
-  if(!confirm('Restaurar os 4 treinos padrão? Seus treinos personalizados serão substituídos (o histórico é mantido).')) return;
+async function resetDefaults(){
+  if(!(await askConfirm('Restaurar os 4 treinos padrão? Seus treinos personalizados serão substituídos (o histórico é mantido).', 'Restaurar'))) return;
   workouts = JSON.parse(JSON.stringify(DEFAULT_WORKOUTS));
   saveAll(); render(); toast('Treinos restaurados');
 }
 
-function deleteWorkout(id){
+async function deleteWorkout(id){
   const w = workouts.find(x=>x.id===id);
-  if(!w || !confirm(`Excluir o treino "${w.name}"?`)) return;
+  if(!w || !(await askConfirm(`Excluir o treino "${w.name}"?`, 'Excluir'))) return;
   workouts = workouts.filter(x=>x.id!==id);
   saveAll(); render(); toast('Treino excluído');
 }
-function deleteExercise(wid,i){
+async function deleteExercise(wid,i){
   const w = workouts.find(x=>x.id===wid);
-  if(!w || !confirm(`Remover "${w.exercises[i].name}"?`)) return;
+  if(!w || !(await askConfirm(`Remover "${w.exercises[i].name}"?`, 'Remover'))) return;
   w.exercises.splice(i,1);
   saveAll(); render(); toast('Exercício removido');
 }
 
 /* ---------- modais ---------- */
 function openModal(html){ $('modal').innerHTML = html; $('modal-wrap').classList.add('on'); }
-function closeModal(){ $('modal-wrap').classList.remove('on'); }
+let confirmResolve = null;
+function closeModal(){
+  $('modal-wrap').classList.remove('on');
+  if(confirmResolve){ const r = confirmResolve; confirmResolve = null; r(false); }
+}
+/* confirmação dentro do app — o confirm() nativo não aparece em
+   web apps adicionados à tela de início do iOS */
+function askConfirm(msg, okLabel){
+  return new Promise(res=>{
+    confirmResolve = res;
+    openModal(`
+      <h2>⚠️ Confirmar</h2>
+      <p style="margin:12px 0;font-size:1.02rem">${esc(msg)}</p>
+      <div class="row" style="margin-top:18px">
+        <button class="btn secondary" data-act="confirmno">Cancelar</button>
+        <button class="btn" data-act="confirmyes">${esc(okLabel||'Confirmar')}</button>
+      </div>`);
+  });
+}
+function resolveConfirm(val){
+  const r = confirmResolve; confirmResolve = null;
+  $('modal-wrap').classList.remove('on');
+  if(r) r(val);
+}
 
 function openWorkoutModal(id){
   const w = id ? workouts.find(x=>x.id===id) : null;
@@ -1029,6 +1053,8 @@ document.addEventListener('click', function(e){
     case 'delex':       deleteExercise(d.wid, parseInt(d.i,10)); break;
     case 'resetdef':    resetDefaults(); break;
     case 'closemodal':  closeModal(); break;
+    case 'confirmyes':  resolveConfirm(true); break;
+    case 'confirmno':   resolveConfirm(false); break;
     case 'savew':       saveWorkoutModal(d.id || null); break;
     case 'saveex':      saveExerciseModal(d.wid, d.i==='' ? null : parseInt(d.i,10)); break;
   }
@@ -1051,6 +1077,25 @@ document.addEventListener('input', function(e){
 $('modal-wrap').addEventListener('click', function(e){
   if(e.target === this) closeModal();
 });
+
+/* ============================================================
+   ATUALIZAÇÃO AUTOMÁTICA DA DATA
+   O iOS congela o app na tela de início; ao voltar ao primeiro
+   plano (ou virar o dia), re-renderiza para mostrar o dia certo.
+============================================================ */
+let renderedDay = new Date().toDateString();
+function checkDayChange(){
+  const d = new Date().toDateString();
+  if(d !== renderedDay){
+    renderedDay = d;
+    render();
+    toast('📅 Novo dia — treino atualizado');
+  }
+}
+setInterval(checkDayChange, 30000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkDayChange(); });
+window.addEventListener('pageshow', checkDayChange);
+window.addEventListener('focus', checkDayChange);
 
 /* ============================================================
    INÍCIO
