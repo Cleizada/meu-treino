@@ -142,6 +142,25 @@
   #restbar.finished{background:#0d2b17;border-color:var(--green)}
   #restbar.finished .time{color:var(--green)}
 
+  /* TIMER EM TELA CHEIA */
+  #restfull{
+    position:fixed;inset:0;z-index:150;background:var(--bg);
+    display:none;flex-direction:column;align-items:center;justify-content:center;
+    gap:14px;padding:24px;text-align:center;
+  }
+  #restfull.on{display:flex}
+  #restfull .rf-label{color:var(--muted);font-weight:700;text-transform:uppercase;font-size:.95rem;max-width:90%}
+  #restfull .rf-time{
+    font-size:clamp(5rem,30vw,11rem);font-weight:800;color:var(--accent);
+    font-variant-numeric:tabular-nums;line-height:1;
+  }
+  #restfull.finished .rf-time{color:var(--green)}
+  #restfull.finished .rf-label{color:var(--green)}
+  #restfull .rf-bar{width:82%;max-width:420px;height:8px;background:#333;border-radius:99px;overflow:hidden}
+  #restfull .rf-bar i{display:block;height:100%;background:var(--accent);transition:width .25s linear}
+  #restfull .rf-hint{color:var(--muted);font-size:.8rem}
+  #restfull .row{width:82%;max-width:420px;justify-content:center}
+
   /* NAV */
   nav{
     position:fixed;left:0;right:0;bottom:0;z-index:100;
@@ -233,7 +252,7 @@
 <!-- Barra de descanso -->
 <div id="restbar">
   <div class="row">
-    <div>
+    <div data-act="restfullopen" style="cursor:pointer">
       <div class="muted" id="rest-label" style="font-size:.78rem;text-transform:uppercase;font-weight:700">Descanso</div>
       <div class="time" id="rest-time">0:00</div>
     </div>
@@ -243,6 +262,20 @@
     <button class="btn small danger" data-act="reststop">✕</button>
   </div>
   <div class="bar"><i id="rest-progress" style="width:100%"></i></div>
+</div>
+
+<!-- Timer de descanso em tela cheia -->
+<div id="restfull">
+  <div class="rf-label" id="restfull-label">Descanso</div>
+  <div class="rf-time" id="restfull-time">0:00</div>
+  <div class="rf-bar"><i id="restfull-bar" style="width:100%"></i></div>
+  <div class="row">
+    <button class="btn small secondary" data-act="restadj" data-v="-15">−15s</button>
+    <button class="btn small secondary" data-act="restadj" data-v="15">+15s</button>
+    <button class="btn small danger" data-act="reststop">✕ Parar</button>
+  </div>
+  <button class="btn secondary" style="width:82%;max-width:420px" data-act="restfullclose">↩ Voltar ao treino</button>
+  <div class="rf-hint">A tela fica acesa durante o descanso 🔆</div>
 </div>
 
 <nav>
@@ -636,47 +669,123 @@ async function finishWorkout(){
 }
 
 /* ============================================================
-   CRONÔMETRO DE DESCANSO
+   WAKE LOCK — mantém a tela acesa durante descanso/cardio
 ============================================================ */
-let restTotal = 0, restLeft = 0, restInterval = null;
+let wakeLock = null;
+async function requestWakeLock(){
+  try{
+    if('wakeLock' in navigator){ wakeLock = await navigator.wakeLock.request('screen'); }
+  }catch(e){}
+}
+function releaseWakeLockIfIdle(){
+  if(restInterval || cardio.running) return;
+  try{ if(wakeLock){ wakeLock.release(); wakeLock = null; } }catch(e){}
+}
+
+/* ============================================================
+   CRONÔMETRO DE DESCANSO
+   Baseado no relógio real (timestamp de término), não em
+   contagem de ticks — o iOS pausa o JavaScript em segundo
+   plano/tela bloqueada, mas ao voltar o tempo continua certo.
+============================================================ */
+let restTotal = 0, restEndsAt = 0, restLabel = '', restInterval = null, restFinishedShown = false;
+
+function restLeftNow(){ return Math.ceil((restEndsAt - Date.now())/1000); }
 
 function restStart(type, exName){
-  restStop();
   restTotal = settings.rest[type] || 90;
-  restLeft = restTotal;
-  $('rest-label').textContent = 'Descanso · ' + (exName || type);
-  const bar = $('restbar');
-  bar.classList.add('on'); bar.classList.remove('finished');
-  updateRestUI();
-  restInterval = setInterval(()=>{
-    restLeft--;
-    updateRestUI();
-    if(restLeft<=0){
-      clearInterval(restInterval); restInterval=null;
-      bar.classList.add('finished');
-      $('rest-label').textContent = 'DESCANSO ENCERRADO — próxima série!';
-      beep(3);
-      setTimeout(()=>{ if(restLeft<=0) restStop(); }, 5000);
-    }
-  }, 1000);
+  restEndsAt = Date.now() + restTotal*1000;
+  restLabel = exName || type;
+  LS.set('rest', {endsAt: restEndsAt, total: restTotal, label: restLabel});
+  beginRestTicker();
+  $('restfull').classList.add('on'); // abre o timer em tela cheia
+  requestWakeLock();
   // desbloqueia áudio no iOS/Android com o toque
   try{ audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)(); audioCtx.resume(); }catch(e){}
 }
-function updateRestUI(){
-  $('rest-time').textContent = fmtTime(restLeft);
-  $('rest-progress').style.width = (restTotal? Math.max(0,restLeft/restTotal*100) : 0) + '%';
+
+function beginRestTicker(){
+  clearInterval(restInterval);
+  restFinishedShown = false;
+  $('restbar').classList.add('on');
+  $('restbar').classList.remove('finished');
+  $('restfull').classList.remove('finished');
+  $('rest-label').textContent = 'Descanso · ' + restLabel;
+  updateRestUI();
+  restInterval = setInterval(restTick, 250);
 }
-function restAdjust(d){ restLeft = Math.max(0, restLeft + d); restTotal = Math.max(restTotal, restLeft); updateRestUI(); }
+
+function restTick(){
+  updateRestUI();
+  if(restLeftNow() <= 0 && !restFinishedShown){
+    restFinishedShown = true;
+    LS.set('rest', null);
+    $('restbar').classList.add('finished');
+    $('restfull').classList.add('finished');
+    $('rest-label').textContent = 'DESCANSO ENCERRADO — próxima série!';
+    beep(3);
+    setTimeout(()=>{ if(restFinishedShown) restStop(); }, 6000);
+  }
+}
+
+function updateRestUI(){
+  const left = Math.max(0, restLeftNow());
+  const pct = (restTotal ? Math.min(100, Math.max(0, left/restTotal*100)) : 0) + '%';
+  $('rest-time').textContent = fmtTime(left);
+  $('rest-progress').style.width = pct;
+  $('restfull-time').textContent = fmtTime(left);
+  $('restfull-bar').style.width = pct;
+  $('restfull-label').textContent = $('rest-label').textContent;
+}
+
+function restAdjust(d){
+  restEndsAt = Math.max(Date.now(), restEndsAt + d*1000);
+  restTotal = Math.max(restTotal, restLeftNow());
+  if(!restFinishedShown) LS.set('rest', {endsAt: restEndsAt, total: restTotal, label: restLabel});
+  updateRestUI();
+}
+
 function restStop(){
   if(restInterval){ clearInterval(restInterval); restInterval=null; }
+  restFinishedShown = false;
+  LS.set('rest', null);
   $('restbar').classList.remove('on','finished');
+  $('restfull').classList.remove('on','finished');
+  releaseWakeLockIfIdle();
+}
+
+/* retoma o descanso se o app foi fechado/recarregado no meio */
+function resumeRest(){
+  const r = LS.get('rest', null);
+  if(!r || !r.endsAt) return;
+  restEndsAt = r.endsAt; restTotal = r.total; restLabel = r.label || '';
+  if(r.endsAt > Date.now() || Date.now() - r.endsAt < 3*60*1000){
+    // ainda rodando, ou acabou há pouco (avisa que encerrou)
+    beginRestTicker();
+    if(r.endsAt > Date.now()){ $('restfull').classList.add('on'); requestWakeLock(); }
+  } else {
+    LS.set('rest', null);
+  }
 }
 
 /* ============================================================
    CARDIO
 ============================================================ */
 let cardioAfter = null;
-let cardio = { phases:[], idx:0, left:0, elapsed:0, running:false, interval:null };
+let cardio = { phases:[], running:false, startAt:0, baseElapsed:0, lastIdx:-1, interval:null };
+
+function cardioElapsed(){
+  return cardio.running ? cardio.baseElapsed + (Date.now()-cardio.startAt)/1000 : cardio.baseElapsed;
+}
+function cardioState(){
+  const e = cardioElapsed();
+  let acc = 0;
+  for(let i=0;i<cardio.phases.length;i++){
+    acc += cardio.phases[i].dur;
+    if(e < acc) return {idx:i, left: Math.ceil(acc - e), done:false};
+  }
+  return {idx: Math.max(0, cardio.phases.length-1), left:0, done:true};
+}
 
 function cardioPhases(){
   if(currentWeek() >= 5){
@@ -692,19 +801,20 @@ function renderCardio(){
   const w = cardioAfter || workoutForToday();
   const proto = (w && w.cardio) ? w.cardio : 'Cardio livre — esteira leve 15–20 min';
   const phases = cardio.phases.length ? cardio.phases : cardioPhases();
+  const started = cardio.running || cardio.baseElapsed>0;
+  const st = cardio.phases.length ? cardioState() : {idx:0, left:phases[0].dur, done:false};
   const totalDur = phases.reduce((a,p)=>a+p.dur,0);
 
   const phaseList = phases.map((p,i)=>{
     let cls = '';
-    if(cardio.running || cardio.elapsed>0){
-      if(i < cardio.idx) cls='past';
-      else if(i === cardio.idx) cls='now';
+    if(started){
+      if(i < st.idx) cls='past';
+      else if(i === st.idx) cls='now';
     }
     return `<div class="p ${cls}"><span>${esc(p.name)}</span><span>${fmtTime(p.dur)}</span></div>`;
   }).join('');
 
-  const cur = phases[cardio.idx] || phases[0];
-  const started = cardio.running || cardio.elapsed>0;
+  const cur = phases[st.idx] || phases[0];
 
   return `
     <div class="card">
@@ -716,12 +826,12 @@ function renderCardio(){
     </div>
     <div class="card cardio-timer">
       <div class="phase-name">${started ? esc(cur.name) : 'Pronto?'}</div>
-      <div class="clock">${fmtTime(started ? cardio.left : phases[0].dur)}</div>
-      <div class="total">Total: ${fmtTime(cardio.elapsed)} / ${fmtTime(totalDur)}</div>
+      <div class="clock">${fmtTime(started ? st.left : phases[0].dur)}</div>
+      <div class="total">Total: ${fmtTime(cardioElapsed())} / ${fmtTime(totalDur)}</div>
       <div class="row" style="margin-top:16px">
         ${cardio.running
           ? '<button class="btn secondary" data-act="cardiopause">⏸️ Pausar</button>'
-          : `<button class="btn" data-act="cardiostart">${cardio.elapsed>0?'▶️ Retomar':'▶️ Iniciar cardio'}</button>`}
+          : `<button class="btn" data-act="cardiostart">${cardio.baseElapsed>0?'▶️ Retomar':'▶️ Iniciar cardio'}</button>`}
         <button class="btn danger" style="width:auto" data-act="cardioreset">↺</button>
       </div>
       <div class="phase-list">${phaseList}</div>
@@ -732,28 +842,43 @@ function renderCardio(){
 function cardioStart(){
   if(!cardio.phases.length){
     cardio.phases = cardioPhases();
-    cardio.idx = 0; cardio.left = cardio.phases[0].dur; cardio.elapsed = 0;
+    cardio.baseElapsed = 0;
   }
+  cardio.startAt = Date.now();
   cardio.running = true;
+  cardio.lastIdx = cardioState().idx;
   clearInterval(cardio.interval);
-  cardio.interval = setInterval(()=>{
-    cardio.left--; cardio.elapsed++;
-    if(cardio.left<=0){
-      cardio.idx++;
-      if(cardio.idx >= cardio.phases.length){
-        cardioPause(); beep(4); toast('Cardio concluído! 🎉');
-        cardio.phases=[]; cardio.idx=0; cardio.elapsed=0;
-        render(); return;
-      }
-      beep(2);
-      cardio.left = cardio.phases[cardio.idx].dur;
-    }
-    if(view==='cardio') render();
-  },1000);
+  cardio.interval = setInterval(cardioTick, 1000);
+  requestWakeLock();
   render();
 }
-function cardioPause(){ cardio.running=false; clearInterval(cardio.interval); cardio.interval=null; render(); }
-function cardioReset(){ cardioPause(); cardio.phases=[]; cardio.idx=0; cardio.left=0; cardio.elapsed=0; render(); }
+function cardioTick(){
+  const st = cardioState();
+  if(st.done){
+    cardio.running = false;
+    clearInterval(cardio.interval); cardio.interval = null;
+    beep(4); toast('Cardio concluído! 🎉');
+    cardio.phases = []; cardio.baseElapsed = 0; cardio.lastIdx = -1;
+    releaseWakeLockIfIdle();
+    render(); return;
+  }
+  if(st.idx !== cardio.lastIdx){ cardio.lastIdx = st.idx; beep(2); }
+  if(view==='cardio') render();
+}
+function cardioPause(){
+  cardio.baseElapsed = cardioElapsed();
+  cardio.running = false;
+  clearInterval(cardio.interval); cardio.interval = null;
+  releaseWakeLockIfIdle();
+  render();
+}
+function cardioReset(){
+  cardio.running = false;
+  clearInterval(cardio.interval); cardio.interval = null;
+  cardio.phases = []; cardio.baseElapsed = 0; cardio.lastIdx = -1;
+  releaseWakeLockIfIdle();
+  render();
+}
 
 /* ============================================================
    HISTÓRICO + GRÁFICO
@@ -1037,6 +1162,8 @@ document.addEventListener('click', function(e){
     case 'start':       startWorkout(d.v); break;
     case 'restadj':     restAdjust(parseInt(d.v,10)); break;
     case 'reststop':    restStop(); break;
+    case 'restfullopen':  $('restfull').classList.add('on'); break;
+    case 'restfullclose': $('restfull').classList.remove('on'); break;
     case 'rest':        restStart(d.type, d.name); break;
     case 'togglebody':  toggleBody(parseInt(d.ei,10)); break;
     case 'addset':      addSet(parseInt(d.ei,10)); break;
@@ -1093,7 +1220,13 @@ function checkDayChange(){
   }
 }
 setInterval(checkDayChange, 30000);
-document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkDayChange(); });
+document.addEventListener('visibilitychange', ()=>{
+  if(!document.hidden){
+    checkDayChange();
+    // o iOS solta o wake lock quando o app sai de cena; re-adquire ao voltar
+    if(restInterval || cardio.running) requestWakeLock();
+  }
+});
 window.addEventListener('pageshow', checkDayChange);
 window.addEventListener('focus', checkDayChange);
 
@@ -1101,6 +1234,7 @@ window.addEventListener('focus', checkDayChange);
    INÍCIO
 ============================================================ */
 go(session ? 'workout' : 'home');
+resumeRest(); // retoma o cronômetro de descanso se o app foi fechado no meio
 </script>
 </body>
 </html>
